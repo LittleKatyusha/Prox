@@ -11,10 +11,8 @@ from enum import Enum
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Response, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.responses import StreamingResponse
-from starlette.requests import ClientDisconnect
 import traceback
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -115,118 +113,63 @@ class APIKeyManager:
     def __init__(self):
         self.keys_info_file = Path("api_keys.json")
         self.valid_keys = set()
-        self.key_info = {}  # Store key -> {name, version} mapping
+        self.key_names = {}  # Store key -> name mapping
         self.load_key_info()
     
     def load_key_info(self):
-        """Load API keys and their info from JSON file"""
+        """Load API keys and their names from JSON file"""
         if self.keys_info_file.exists():
             try:
                 with open(self.keys_info_file, 'r') as f:
                     data = json.load(f)
-                    # Support old format (key_names) and new format (keys)
-                    if 'keys' in data:
-                        self.key_info = data.get('keys', {})
-                    elif 'key_names' in data:
-                        # Migrate old format
-                        old_names = data.get('key_names', {})
-                        self.key_info = {k: {'name': v, 'version': 'all'} for k, v in old_names.items()}
-                    self.valid_keys = set(self.key_info.keys())
+                    self.key_names = data.get('key_names', {})
+                    self.valid_keys = set(self.key_names.keys())
                 logging.info(f"Loaded {len(self.valid_keys)} API keys")
             except Exception as e:
                 logging.error(f"Error loading API keys: {e}")
-                self.key_info = {}
+                self.key_names = {}
                 self.valid_keys = set()
         else:
             logging.warning("api_keys.json not found. Creating empty file.")
             self.save_key_info()
 
     def get_keys(self):
-        """Get all API keys with their info"""
+        """Get all API keys with their names"""
         return [
-            {
-                'api_key': key,
-                'name': info.get('name', 'Unnamed'),
-                'version': info.get('version', 'all')
-            }
-            for key, info in self.key_info.items()
+            {'api_key': key, 'name': self.key_names.get(key, 'Unnamed')}
+            for key in self.valid_keys
         ]
     
     def save_key_info(self):
-        """Save API key info and metadata"""
+        """Save API key names and metadata"""
         with open(self.keys_info_file, 'w') as f:
-            json.dump({'keys': self.key_info}, f, indent=2)
+            json.dump({'key_names': self.key_names}, f, indent=2)
     
-    def add_key(self, api_key: str, name: str = "Unnamed", version: str = "all"):
-        """Add a new API key with name and version"""
+    def add_key(self, api_key: str, name: str = "Unnamed"):
+        """Add a new API key with an optional name"""
         self.valid_keys.add(api_key)
-        self.key_info[api_key] = {'name': name, 'version': version}
+        self.key_names[api_key] = name
         self.save_key_info()
     
     def remove_key(self, api_key: str):
         """Remove an API key"""
         self.valid_keys.discard(api_key)
-        self.key_info.pop(api_key, None)
+        self.key_names.pop(api_key, None)
         self.save_key_info()
     
     def set_key_name(self, api_key: str, name: str):
         """Set a friendly name for an API key"""
         if api_key in self.valid_keys:
-            self.key_info[api_key]['name'] = name
-            self.save_key_info()
-    
-    def set_key_version(self, api_key: str, version: str):
-        """Set version for an API key"""
-        if api_key in self.valid_keys:
-            self.key_info[api_key]['version'] = version
+            self.key_names[api_key] = name
             self.save_key_info()
     
     def get_key_name(self, api_key: str) -> str:
         """Get the friendly name for an API key"""
-        return self.key_info.get(api_key, {}).get('name', 'Unnamed')
-    
-    def get_key_version(self, api_key: str):
-        """Get the version(s) for an API key - returns string or list"""
-        return self.key_info.get(api_key, {}).get('version', 'all')
-    
-    def get_key_versions_list(self, api_key: str) -> list:
-        """Get versions as a list for easier processing"""
-        version = self.get_key_version(api_key)
-        
-        # If it's already a list, return it
-        if isinstance(version, list):
-            return version
-        
-        # If it's a string, convert to list
-        if isinstance(version, str):
-            # Handle comma-separated versions (e.g., "v1,v2,v3")
-            if ',' in version:
-                return [v.strip() for v in version.split(',')]
-            return [version]
-        
-        return ['all']
+        return self.key_names.get(api_key, "Unnamed")
 
     def is_valid(self, api_key: str) -> bool:
         """Check if API key is valid"""
         return api_key in self.valid_keys
-    
-    def can_access_model(self, api_key: str, model_name: str) -> bool:
-        """Check if API key can access a specific model based on version(s)"""
-        if api_key not in self.valid_keys:
-            return False
-        
-        allowed_versions = self.get_key_versions_list(api_key)
-        
-        # 'all' version can access any model
-        if 'all' in allowed_versions:
-            return True
-        
-        # Check if model ends with any of the allowed versions
-        for version in allowed_versions:
-            if model_name.endswith(f'-{version}'):
-                return True
-        
-        return False
     
     def reload_keys(self):
         """Reload keys from file (useful for runtime updates)"""
@@ -770,30 +713,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Next.js static files
-next_static_path = Path(__file__).parent / "model-landing" / ".next" / "static"
-next_public_path = Path(__file__).parent / "model-landing" / "public"
-
-if next_static_path.exists():
-    app.mount("/_next/static", StaticFiles(directory=str(next_static_path)), name="next-static")
-
-if next_public_path.exists():
-    app.mount("/public", StaticFiles(directory=str(next_public_path)), name="public")
-
 # --- Simplified API Handler ---
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, api_key: str = Depends(verify_api_key)):
-    try:
-        openai_req = await request.json()
-    except ClientDisconnect:
-        # Client disconnected before request body was fully read
-        logging.warning(f"Client disconnected before request body was read")
-        raise HTTPException(status_code=499, detail="Client disconnected")
-    except Exception as e:
-        # Handle other errors like invalid JSON
-        logging.error(f"Error reading request body: {e}")
-        raise HTTPException(status_code=400, detail="Invalid request body")
-    
+    openai_req = await request.json()
     request_id = str(uuid.uuid4())
     is_streaming = openai_req.get("stream", True)
     model_name = openai_req.get("model")
@@ -802,14 +725,6 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
     model_info = MODEL_REGISTRY.get(model_name)
     if not model_info:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
-    
-    # Check if API key can access this model version
-    if not api_key_manager.can_access_model(api_key, model_name):
-        allowed_version = api_key_manager.get_key_version(api_key)
-        raise HTTPException(
-            status_code=403,
-            detail=f"API key is restricted to version '{allowed_version}' models only. Cannot access '{model_name}'."
-        )
 
     # Remove unwanted parameters before sending to backend
     params_to_exclude = ["frequency_penalty", "presence_penalty", "top_p"]
@@ -1193,117 +1108,36 @@ async def check_usage(request: Request, api_key: str = Depends(verify_api_key)):
     }
 
 @app.get("/v1/models")
-async def get_models(api_key: str = Depends(verify_api_key)):
-    """Lists available models from a text file in an OpenAI-compatible format, filtered by API key version(s)."""
-    
-    # Get the allowed versions for this API key
-    allowed_versions = api_key_manager.get_key_versions_list(api_key)
-    
-    models_data = []
-    try:
-        with open("allowed_models.txt", "r") as f:
-            for line in f:
-                model_name = line.strip()
-                if model_name and not model_name.startswith('#'):
-                    # Filter by version(s) if not 'all'
-                    if 'all' in allowed_versions:
-                        models_data.append({
-                            "id": model_name,
-                            "object": "model",
-                            "created": int(time.time()),
-                            "owned_by": "norenaboi",
-                            "type": "chat"
-                        })
-                    else:
-                        # Check if model matches any allowed version
-                        for version in allowed_versions:
-                            if model_name.endswith(f'-{version}'):
-                                models_data.append({
-                                    "id": model_name,
-                                    "object": "model",
-                                    "created": int(time.time()),
-                                    "owned_by": "norenaboi",
-                                    "type": "chat"
-                                })
-                                break
-    except FileNotFoundError:
-        # If no file exists, return models from registry (filtered)
-        for model_name, model_info in MODEL_REGISTRY.items():
-            if 'all' in allowed_versions:
-                models_data.append({
-                    "id": model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "Kiru",
-                    "type": model_info.get("type", "chat")
-                })
-            else:
-                for version in allowed_versions:
-                    if model_name.endswith(f'-{version}'):
-                        models_data.append({
-                            "id": model_name,
-                            "object": "model",
-                            "created": int(time.time()),
-                            "owned_by": "Kiru",
-                            "type": model_info.get("type", "chat")
-                        })
-                        break
+async def get_models():  
+    """Lists available models from a text file in an OpenAI-compatible format."""  
       
-    return {
-        "object": "list",
-        "data": models_data
-    }
-
-@app.get("/api/models")
-async def get_models_for_landing(authorization: str = Header(None, alias="Authorization")):
-    """Get models grouped by version for landing page, optionally filtered by API key version(s)"""
-    
-    # Check if authorization header is provided
-    allowed_versions = ['all']
-    if authorization and authorization.startswith("Bearer "):
-        api_key = authorization.replace("Bearer ", "", 1)
-        if api_key_manager.is_valid(api_key):
-            allowed_versions = api_key_manager.get_key_versions_list(api_key)
-    
-    return await get_models_grouped(allowed_versions)
-
-@app.get("/api/models/grouped")
-async def get_models_grouped(version_filters: list = ['all']):
-    """Get models grouped by version for landing page"""
-    # Handle both list and string input for backward compatibility
-    if isinstance(version_filters, str):
-        version_filters = [version_filters]
-    
-    models_by_version = {}
-    
-    try:
-        with open("allowed_models.txt", "r") as f:
+    models_data = []
+    try:  
+        with open("allowed_models.txt", "r") as f:  
             for line in f:
                 model_name = line.strip()
                 if model_name and not model_name.startswith('#'):
-                    # Extract version from model name (e.g., claude-opus-4-5-20251101-v1 -> v1)
-                    if '-v' in model_name:
-                        version = model_name.split('-v')[-1]
-                        version_key = f"v{version}"
-                        
-                        # Filter by version(s) if not 'all'
-                        if 'all' in version_filters or version in version_filters:
-                            if version_key not in models_by_version:
-                                models_by_version[version_key] = []
-                            
-                            # Extract base model name without version
-                            base_name = model_name.rsplit('-v', 1)[0]
-                            
-                            models_by_version[version_key].append({
-                                "name": base_name.replace('-', ' ').title(),
-                                "version": model_name,
-                                "description": f"AI model {base_name}"
-                            })
-    except FileNotFoundError:
-        logging.warning("allowed_models.txt not found")
-    
-    return {
-        "models_by_version": models_by_version
+                    models_data.append({  
+                        "id": model_name,  
+                        "object": "model",  
+                        "created": int(time.time()),  
+                        "owned_by": "norenaboi",  
+                        "type": "chat"  # Default to chat type
+                    })
+    except FileNotFoundError:  
+        # If no file exists, return models from registry
+        for model_name, model_info in MODEL_REGISTRY.items():
+            models_data.append({  
+                "id": model_name,  
+                "object": "model",  
+                "created": int(time.time()),  
+                "owned_by": "norenaboi",  
+                "type": model_info.get("type", "chat")  
+            })
+      
+    return {  
+        "object": "list",  
+        "data": models_data  
     }
 
 # -------------------------------------------
@@ -1461,7 +1295,6 @@ async def add_api_key(
     try:
         api_key = request.get('api_key', '').strip()
         name = request.get('name', '').strip()
-        version = request.get('version', 'all').strip()
         
         if not api_key or not name:
             raise HTTPException(status_code=400, detail="API key and name are required")
@@ -1470,38 +1303,35 @@ async def add_api_key(
         if api_key in api_key_manager.valid_keys:
             raise HTTPException(status_code=400, detail="API key already exists")
         
-        # Add new key with version
-        api_key_manager.add_key(api_key, name, version)
-        logging.info(f"Added new API key: {name} (version: {version})")
+        # Add new key (correct signature)
+        api_key_manager.add_key(api_key, name)
+        logging.info(f"Added new API key: {name}")
         
-        return {"message": "API key added successfully", "key": {"api_key": api_key, "name": name, "version": version}}
+        return {"message": "API key added successfully", "key": {"api_key": api_key, "name": name}}
     except HTTPException:
         raise
     except Exception as e:
         logging.error(f"Error adding key: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Update API key name and version
+# Update API key name
 @app.put("/admin/keys/{api_key}")
 async def update_api_key(
     request: dict,
     authorized: bool = Depends(verify_master_key)
 ):
-    """Update an API key's name and/or version"""
+    """Update an API key's name"""
     try:
         new_name = request.get('name', '').strip()
-        new_version = request.get('version', '').strip()
         api_key = request.get('api_key', '').strip()
 
         if not new_name:
             raise HTTPException(status_code=400, detail="Name is required")
         
-        # Update the key
+        # Find and update the key
         api_key_manager.set_key_name(api_key, new_name)
-        if new_version:
-            api_key_manager.set_key_version(api_key, new_version)
         
-        logging.info(f"Updated API key: {api_key} -> {new_name} (version: {new_version or 'unchanged'})")
+        logging.info(f"Updated API key: {api_key} -> {new_name}")
         
         return {"message": "API key updated successfully"}
     except HTTPException:
@@ -1533,63 +1363,6 @@ async def delete_api_key(
     except Exception as e:
         logging.error(f"Error deleting key: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# -------------------------------------------
-# ----------- LANDING PAGE ------------------
-# -------------------------------------------
-
-@app.get("/", response_class=HTMLResponse)
-async def landing_page():
-    """Serve Next.js landing page"""
-    index_path = Path(__file__).parent / "model-landing" / ".next" / "server" / "app" / "index.html"
-    
-    if not index_path.exists():
-        return HTMLResponse(
-            content="""
-            <h1>Landing Page Not Found</h1>
-            <p>Please build Next.js first:</p>
-            <pre>cd model-landing && npm run build</pre>
-            <p>Index path tried: """ + str(index_path) + """</p>
-            """,
-            status_code=404
-        )
-    
-    try:
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        return HTMLResponse(content=html_content)
-    except Exception as e:
-        logging.error(f"Error reading index.html: {e}")
-        return HTMLResponse(
-            content=f"<h1>Error loading landing page</h1><p>{str(e)}</p>",
-            status_code=500
-        )
-
-@app.get("/_next/static/{path:path}")
-async def next_static_files(path: str):
-    """Serve Next.js static files"""
-    file_path = Path(__file__).parent / "model-landing" / ".next" / "static" / path
-    
-    if file_path.exists() and file_path.is_file():
-        return FileResponse(file_path)
-    
-    raise HTTPException(status_code=404, detail=f"Static file not found: {path}")
-
-@app.get("/{filename}")
-async def serve_root_files(filename: str):
-    """Serve files from Next.js public directory or app root"""
-    # Try public directory first
-    public_path = Path(__file__).parent / "model-landing" / "public" / filename
-    if public_path.exists() and public_path.is_file():
-        return FileResponse(public_path)
-    
-    # Try app directory for favicon, etc
-    app_path = Path(__file__).parent / "model-landing" / "app" / filename
-    if app_path.exists() and app_path.is_file():
-        return FileResponse(app_path)
-    
-    # If not found, let other routes handle it
-    raise HTTPException(status_code=404)
 
 print("\n" + "="*60)
 print("Kiru Proxy")

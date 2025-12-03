@@ -6,14 +6,5 @@ claude-opus-4-20250514-v1
 claude-sonnet-4-5-20250929-v1
 gemini-3-pro-v1
 
-#V2
-claude-opus-4-5-20251101-v2
-claude-sonnet-4-5-20250929-v2
-
-#V3
-claude-opus-4-5-20251101-v3
-claude-sonnet-4-5-20250929-v3
-
-#V4
+#v4
 gemini-3-pro-preview-v4
-
