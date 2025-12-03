@@ -713,9 +713,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Simplified API Handler ---
+# --- API Handlers ---
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request, api_key: str = Depends(verify_api_key)):
+async def chat_completions_v1(request: Request, api_key: str = Depends(verify_api_key)):
     openai_req = await request.json()
     request_id = str(uuid.uuid4())
     is_streaming = openai_req.get("stream", True)
@@ -754,6 +754,54 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
         else:
             # Non-streaming response
             response_data = await make_backend_request(request_id, openai_req, model_name, api_key)
+            return response_data
+            
+    except Exception as e:
+        log_request_end(request_id, False, 0, 0, str(e))
+        logging.error(f"API [ID: {request_id}]: Exception: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Exception: Encountered an error. Please try again later or DM norenaboi.")
+
+@app.post("/v2/chat/completions")
+async def chat_completions_v2(request: Request, api_key: str = Depends(verify_api_key)):
+    """Endpoint for v2 and v3 models combined"""
+    openai_req = await request.json()
+    request_id = str(uuid.uuid4())
+    is_streaming = openai_req.get("stream", True)
+    model_name = openai_req.get("model")
+    
+    # Validate model
+    model_info = MODEL_REGISTRY.get(model_name)
+    if not model_info:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
+
+    # Remove unwanted parameters before sending to backend
+    params_to_exclude = ["frequency_penalty", "presence_penalty", "top_p"]
+    for param in params_to_exclude:
+        openai_req.pop(param, None)
+    
+    # Log request start for stats
+    request_params = {
+        "temperature": openai_req.get("temperature"),
+        "max_tokens": openai_req.get("max_tokens"),
+        "streaming": is_streaming
+    }
+    messages = openai_req.get("messages", [])
+    log_request_start(request_id, model_name, request_params, messages, api_key)
+    
+    try:
+        if is_streaming:
+            return StreamingResponse(
+                stream_from_backend_v2(request_id, openai_req, model_name, api_key),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        else:
+            # Non-streaming response
+            response_data = await make_backend_request_v2(request_id, openai_req, model_name, api_key)
             return response_data
             
     except Exception as e:
@@ -1041,6 +1089,215 @@ async def make_backend_request(
         
         raise
 
+# --- Backend Request Functions for V2 endpoint ---
+async def stream_from_backend_v2(
+    request_id: str,
+    openai_req: dict,
+    model_name: str,
+    api_key: str
+) -> AsyncGenerator[str, None]:
+    """Stream responses directly from the backend for v2/v3 models"""
+    start_time = time.time()
+    accumulated_content = ""
+
+    # Determine backend based on model suffix
+    if model_name.endswith('-v2'):
+        backend_url = Config.V2_URL
+        backend_token = Config.V2_TOKEN
+        actual_model = model_name.replace('-v2', '')
+    elif model_name.endswith('-v3'):
+        backend_url = Config.V3_URL
+        backend_token = Config.V3_TOKEN
+        actual_model = model_name.replace('-v3', '')
+    else:
+        error_response = {
+            "error": {
+                "message": "Error 404: This endpoint only supports v2 and v3 models.",
+                "type": "server_error",
+                "code": 404
+            }
+        }
+        raise HTTPException(status_code=404, detail=error_response)
+
+    backend_url = backend_url + "/v1/chat/completions"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Prepare the request
+            data = {
+                "model": actual_model,
+                "stream": True,
+                "messages": openai_req.get("messages", []),
+                "max_tokens": openai_req.get("max_tokens")
+            }
+
+            BACKEND_HEADERS = {
+                "Authorization": f"Bearer {backend_token}",
+                "Content-Type": "application/json"
+            }
+            
+            # Remove None values
+            data = {k: v for k, v in data.items() if v is not None}
+            
+            async with session.post(
+                backend_url,
+                headers=BACKEND_HEADERS,
+                json=data
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    error_msg = "Backend JSON/Parameter error."
+                    logging.error(f"BACKEND [ID: {request_id}]: {error_text[:200]}")
+                    
+                    # Return OpenAI-formatted error
+                    error_response = {
+                        "error": {
+                            "message": error_msg,
+                            "type": "server_error",
+                            "code": response.status
+                        }
+                    }
+                    yield f"data: {json.dumps(error_response)}\n\ndata: [DONE]\n\n"
+                    return
+                
+                # Stream the response
+                async for line in response.content:
+                    if line:
+                        decoded = line.decode("utf-8").strip()
+                        if decoded.startswith("data: "):
+                            payload = decoded[6:].strip()
+                            
+                            if payload == "[DONE]":
+                                yield "data: [DONE]\n\n"
+                                break
+                            
+                            try:
+                                # Parse and accumulate content for logging
+                                chunk_data = json.loads(payload)
+                                
+                                # Check if chunk_data is valid
+                                if chunk_data is not None and isinstance(chunk_data, dict):
+                                    choices = chunk_data.get("choices", [])
+                                    if choices and len(choices) > 0:
+                                        delta = choices[0].get("delta", {})
+                                        if delta:
+                                            content = delta.get("content", "")
+                                            if content:
+                                                accumulated_content += content
+                                
+                                # Forward the chunk as-is
+                                yield f"data: {payload}\n\n"
+                                
+                            except json.JSONDecodeError:
+                                response_data = {"error": {"message": "Invalid JSON response."}}
+                                logging.warning(f"BACKEND [ID: {request_id}]: Invalid JSON in stream.")
+                                continue
+        
+        # Log successful completion
+        input_tokens = estimateTokens(json.dumps(openai_req))
+        output_tokens = estimateTokens(accumulated_content)
+        log_request_end(request_id, True, input_tokens, output_tokens, response_content=accumulated_content, api_key=api_key)
+        
+    except Exception as e:
+        logging.error(f"BACKEND [ID: {request_id}]: Stream error: {e}", exc_info=True)
+        
+        # Log error
+        log_error(request_id, type(e).__name__, str(e), traceback.format_exc())
+        log_request_end(request_id, False, 0, 0, str(e))
+        
+        # Return error in OpenAI format
+        error_response = {
+            "error": {
+                "message": "Server side error. Please try again later or DM norenaboi.",
+                "type": "server_error",
+                "code": None
+            }
+        }
+        yield f"data: {json.dumps(error_response)}\n\ndata: [DONE]\n\n"
+
+async def make_backend_request_v2(
+    request_id: str,
+    openai_req: dict,
+    model_name: str,
+    api_key: str
+) -> dict:
+    """Make non-streaming request to backend for v2/v3 models"""
+    start_time = time.time()
+
+    # Determine backend based on model suffix
+    if model_name.endswith('-v2'):
+        backend_url = Config.V2_URL
+        backend_token = Config.V2_TOKEN
+        actual_model = model_name.replace('-v2', '')
+    elif model_name.endswith('-v3'):
+        backend_url = Config.V3_URL
+        backend_token = Config.V3_TOKEN
+        actual_model = model_name.replace('-v3', '')
+    else:
+        error_response = {
+            "error": {
+                "message": "Error 404: This endpoint only supports v2 and v3 models.",
+                "type": "server_error",
+                "code": 404
+            }
+        }
+        raise HTTPException(status_code=404, detail=error_response)
+
+    backend_url = backend_url + "/v1/chat/completions"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Prepare the request
+            data = {
+                "model": actual_model,
+                "stream": False,
+                "messages": openai_req.get("messages", []),
+                "max_tokens": openai_req.get("max_tokens")
+            }
+
+            BACKEND_HEADERS = {
+                "Authorization": f"Bearer {backend_token}",
+                "Content-Type": "application/json"
+            }
+            
+            # Remove None values
+            data = {k: v for k, v in data.items() if v is not None}
+            
+            async with session.post(
+                backend_url,
+                headers=BACKEND_HEADERS,
+                json=data
+            ) as response:
+                # Get response text first, then parse as JSON
+                response_text = await response.text()
+                
+                try:
+                    response_data = json.loads(response_text)
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, wrap the text response
+                    response_data = {"error": {"message": "Invalid JSON response."}}
+                
+                if response.status != 200:
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=response_data.get("Error: Backend JSON/Parameter error. Try disabling prefills or changing presets.")
+                    )
+                
+                # Log successful completion
+                content = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                input_tokens = estimateTokens(json.dumps(openai_req))
+                output_tokens = estimateTokens(content)
+                log_request_end(request_id, True, input_tokens, output_tokens, content, api_key)
+                
+                return response_data
+                
+    except Exception as e:
+        # Log error
+        log_error(request_id, type(e).__name__, str(e), traceback.format_exc())
+        log_request_end(request_id, False, 0, 0, str(e))
+        
+        raise
+
 # Simple token estimation function
 def estimateTokens(text: str) -> int:
     if not text:
@@ -1108,36 +1365,75 @@ async def check_usage(request: Request, api_key: str = Depends(verify_api_key)):
     }
 
 @app.get("/v1/models")
-async def get_models():  
-    """Lists available models from a text file in an OpenAI-compatible format."""  
+async def get_models_v1():
+    """Lists available models excluding v2 and v3 models in an OpenAI-compatible format."""
       
     models_data = []
-    try:  
-        with open("allowed_models.txt", "r") as f:  
+    try:
+        with open("allowed_models.txt", "r") as f:
             for line in f:
                 model_name = line.strip()
+                # Exclude models with -v2 or -v3 suffix
                 if model_name and not model_name.startswith('#'):
-                    models_data.append({  
-                        "id": model_name,  
-                        "object": "model",  
-                        "created": int(time.time()),  
-                        "owned_by": "norenaboi",  
-                        "type": "chat"  # Default to chat type
-                    })
-    except FileNotFoundError:  
-        # If no file exists, return models from registry
+                    if not (model_name.endswith('-v2') or model_name.endswith('-v3')):
+                        models_data.append({
+                            "id": model_name,
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "norenaboi",
+                            "type": "chat"  # Default to chat type
+                        })
+    except FileNotFoundError:
+        # If no file exists, return models from registry (excluding v2/v3)
         for model_name, model_info in MODEL_REGISTRY.items():
-            models_data.append({  
-                "id": model_name,  
-                "object": "model",  
-                "created": int(time.time()),  
-                "owned_by": "norenaboi",  
-                "type": model_info.get("type", "chat")  
-            })
+            if not (model_name.endswith('-v2') or model_name.endswith('-v3')):
+                models_data.append({
+                    "id": model_name,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "norenaboi",
+                    "type": model_info.get("type", "chat")
+                })
       
-    return {  
-        "object": "list",  
-        "data": models_data  
+    return {
+        "object": "list",
+        "data": models_data
+    }
+
+@app.get("/v2/models")
+async def get_models_v2():
+    """Lists available v2 and v3 models only in an OpenAI-compatible format."""
+      
+    models_data = []
+    try:
+        with open("allowed_models.txt", "r") as f:
+            for line in f:
+                model_name = line.strip()
+                # Only include models with -v2 or -v3 suffix
+                if model_name and not model_name.startswith('#'):
+                    if model_name.endswith('-v2') or model_name.endswith('-v3'):
+                        models_data.append({
+                            "id": model_name,
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "norenaboi",
+                            "type": "chat"
+                        })
+    except FileNotFoundError:
+        # If no file exists, return v2/v3 models from registry
+        for model_name, model_info in MODEL_REGISTRY.items():
+            if model_name.endswith('-v2') or model_name.endswith('-v3'):
+                models_data.append({
+                    "id": model_name,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "norenaboi",
+                    "type": model_info.get("type", "chat")
+                })
+      
+    return {
+        "object": "list",
+        "data": models_data
     }
 
 # -------------------------------------------
