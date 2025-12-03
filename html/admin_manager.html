@@ -772,19 +772,8 @@
                     </div>
                     <div class="form-group">
                         <label for="newKeyVersion">Version Access</label>
-                        <select id="newKeyVersion" style="padding: 12px 16px; border: 2px solid var(--gray-200); border-radius: 10px; font-size: 14px; font-family: inherit; background: var(--gray-50); cursor: pointer;">
-                            <option value="all">All Versions</option>
-                            <option value="v1">V1 Only</option>
-                            <option value="v2">V2 Only</option>
-                            <option value="v3">V3 Only</option>
-                            <option value="v4">V4 Only</option>
-                            <option value="v5">V5 Only</option>
-                            <option value="v6">V6 Only</option>
-                            <option value="v7">V7 Only</option>
-                            <option value="v8">V8 Only</option>
-                            <option value="v9">V9 Only</option>
-                            <option value="v10">V10 Only</option>
-                        </select>
+                        <input type="text" id="newKeyVersion" placeholder="all or v1,v2,v3" value="all" style="padding: 12px 16px; border: 2px solid var(--gray-200); border-radius: 10px; font-size: 14px; font-family: inherit; background: var(--gray-50);">
+                        <small style="color: var(--gray-500); font-size: 12px; margin-top: 4px; display: block;">Enter "all" for all versions, or comma-separated versions like "v1,v2,v3"</small>
                     </div>
                     <button class="btn btn-success" onclick="generateKey()">
                         <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
@@ -893,7 +882,20 @@
 
             keys.forEach(key => {
                 const version = key.version || 'all';
-                const versionBadge = version === 'all' ? 'All Versions' : version.toUpperCase();
+                // Handle both string and array versions
+                let versionDisplay = version;
+                if (Array.isArray(version)) {
+                    versionDisplay = version.join(', ');
+                } else if (typeof version === 'string' && version.includes(',')) {
+                    versionDisplay = version;
+                } else if (version === 'all') {
+                    versionDisplay = 'All Versions';
+                } else {
+                    versionDisplay = version.toUpperCase();
+                }
+                
+                const versionValue = Array.isArray(version) ? version.join(',') : version;
+                
                 html += `
                     <tr id="key-row-${key.api_key}">
                         <td>
@@ -904,20 +906,8 @@
                             <span class="key-display">${escapeHtml(key.api_key)}</span>
                         </td>
                         <td>
-                            <span class="version-display badge">${versionBadge}</span>
-                            <select class="edit-version" style="display: none; padding: 8px 12px; border: 2px solid var(--primary); border-radius: 8px; font-size: 14px;">
-                                <option value="all" ${version === 'all' ? 'selected' : ''}>All Versions</option>
-                                <option value="v1" ${version === 'v1' ? 'selected' : ''}>V1 Only</option>
-                                <option value="v2" ${version === 'v2' ? 'selected' : ''}>V2 Only</option>
-                                <option value="v3" ${version === 'v3' ? 'selected' : ''}>V3 Only</option>
-                                <option value="v4" ${version === 'v4' ? 'selected' : ''}>V4 Only</option>
-                                <option value="v5" ${version === 'v5' ? 'selected' : ''}>V5 Only</option>
-                                <option value="v6" ${version === 'v6' ? 'selected' : ''}>V6 Only</option>
-                                <option value="v7" ${version === 'v7' ? 'selected' : ''}>V7 Only</option>
-                                <option value="v8" ${version === 'v8' ? 'selected' : ''}>V8 Only</option>
-                                <option value="v9" ${version === 'v9' ? 'selected' : ''}>V9 Only</option>
-                                <option value="v10" ${version === 'v10' ? 'selected' : ''}>V10 Only</option>
-                            </select>
+                            <span class="version-display badge">${versionDisplay}</span>
+                            <input type="text" class="edit-version" style="display: none; padding: 8px 12px; border: 2px solid var(--primary); border-radius: 8px; font-size: 14px; width: 100%;" value="${escapeHtml(versionValue)}">
                         </td>
                         <td>
                             <div class="actions" style="">
@@ -1015,14 +1005,14 @@
             const nameDisplay = row.querySelector('.key-name-display');
             const nameInput = row.querySelector('.edit-input');
             const versionDisplay = row.querySelector('.version-display');
-            const versionSelect = row.querySelector('.edit-version');
+            const versionInput = row.querySelector('.edit-version');
             const editBtn = row.querySelector('.btn-primary');
             const saveBtn = row.querySelector('.btn-success');
 
             nameDisplay.style.display = 'none';
             nameInput.style.display = 'block';
             versionDisplay.style.display = 'none';
-            versionSelect.style.display = 'block';
+            versionInput.style.display = 'block';
             editBtn.style.display = 'none';
             saveBtn.style.display = 'inline-block';
             nameInput.focus();
@@ -1038,9 +1028,9 @@
 
             const row = document.getElementById(`key-row-${apiKey}`);
             const nameInput = row.querySelector('.edit-input');
-            const versionSelect = row.querySelector('.edit-version');
+            const versionInput = row.querySelector('.edit-version');
             const newName = nameInput.value.trim();
-            const newVersion = versionSelect.value;
+            const newVersion = versionInput.value.trim();
 
             if (!newName) {
                 showMessage('Name cannot be empty', 'error');

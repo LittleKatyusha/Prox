@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 import traceback
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -184,27 +185,48 @@ class APIKeyManager:
         """Get the friendly name for an API key"""
         return self.key_info.get(api_key, {}).get('name', 'Unnamed')
     
-    def get_key_version(self, api_key: str) -> str:
-        """Get the version for an API key"""
+    def get_key_version(self, api_key: str):
+        """Get the version(s) for an API key - returns string or list"""
         return self.key_info.get(api_key, {}).get('version', 'all')
+    
+    def get_key_versions_list(self, api_key: str) -> list:
+        """Get versions as a list for easier processing"""
+        version = self.get_key_version(api_key)
+        
+        # If it's already a list, return it
+        if isinstance(version, list):
+            return version
+        
+        # If it's a string, convert to list
+        if isinstance(version, str):
+            # Handle comma-separated versions (e.g., "v1,v2,v3")
+            if ',' in version:
+                return [v.strip() for v in version.split(',')]
+            return [version]
+        
+        return ['all']
 
     def is_valid(self, api_key: str) -> bool:
         """Check if API key is valid"""
         return api_key in self.valid_keys
     
     def can_access_model(self, api_key: str, model_name: str) -> bool:
-        """Check if API key can access a specific model based on version"""
+        """Check if API key can access a specific model based on version(s)"""
         if api_key not in self.valid_keys:
             return False
         
-        allowed_version = self.get_key_version(api_key)
+        allowed_versions = self.get_key_versions_list(api_key)
         
         # 'all' version can access any model
-        if allowed_version == 'all':
+        if 'all' in allowed_versions:
             return True
         
-        # Check if model ends with the allowed version
-        return model_name.endswith(f'-{allowed_version}')
+        # Check if model ends with any of the allowed versions
+        for version in allowed_versions:
+            if model_name.endswith(f'-{version}'):
+                return True
+        
+        return False
     
     def reload_keys(self):
         """Reload keys from file (useful for runtime updates)"""
@@ -761,7 +783,17 @@ if next_public_path.exists():
 # --- Simplified API Handler ---
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, api_key: str = Depends(verify_api_key)):
-    openai_req = await request.json()
+    try:
+        openai_req = await request.json()
+    except ClientDisconnect:
+        # Client disconnected before request body was fully read
+        logging.warning(f"Client disconnected before request body was read")
+        raise HTTPException(status_code=499, detail="Client disconnected")
+    except Exception as e:
+        # Handle other errors like invalid JSON
+        logging.error(f"Error reading request body: {e}")
+        raise HTTPException(status_code=400, detail="Invalid request body")
+    
     request_id = str(uuid.uuid4())
     is_streaming = openai_req.get("stream", True)
     model_name = openai_req.get("model")
@@ -1162,10 +1194,10 @@ async def check_usage(request: Request, api_key: str = Depends(verify_api_key)):
 
 @app.get("/v1/models")
 async def get_models(api_key: str = Depends(verify_api_key)):
-    """Lists available models from a text file in an OpenAI-compatible format, filtered by API key version."""
+    """Lists available models from a text file in an OpenAI-compatible format, filtered by API key version(s)."""
     
-    # Get the version allowed for this API key
-    allowed_version = api_key_manager.get_key_version(api_key)
+    # Get the allowed versions for this API key
+    allowed_versions = api_key_manager.get_key_versions_list(api_key)
     
     models_data = []
     try:
@@ -1173,8 +1205,8 @@ async def get_models(api_key: str = Depends(verify_api_key)):
             for line in f:
                 model_name = line.strip()
                 if model_name and not model_name.startswith('#'):
-                    # Filter by version if not 'all'
-                    if allowed_version == 'all' or model_name.endswith(f'-{allowed_version}'):
+                    # Filter by version(s) if not 'all'
+                    if 'all' in allowed_versions:
                         models_data.append({
                             "id": model_name,
                             "object": "model",
@@ -1182,17 +1214,40 @@ async def get_models(api_key: str = Depends(verify_api_key)):
                             "owned_by": "norenaboi",
                             "type": "chat"
                         })
+                    else:
+                        # Check if model matches any allowed version
+                        for version in allowed_versions:
+                            if model_name.endswith(f'-{version}'):
+                                models_data.append({
+                                    "id": model_name,
+                                    "object": "model",
+                                    "created": int(time.time()),
+                                    "owned_by": "norenaboi",
+                                    "type": "chat"
+                                })
+                                break
     except FileNotFoundError:
         # If no file exists, return models from registry (filtered)
         for model_name, model_info in MODEL_REGISTRY.items():
-            if allowed_version == 'all' or model_name.endswith(f'-{allowed_version}'):
+            if 'all' in allowed_versions:
                 models_data.append({
                     "id": model_name,
                     "object": "model",
                     "created": int(time.time()),
-                    "owned_by": "norenaboi",
+                    "owned_by": "Kiru",
                     "type": model_info.get("type", "chat")
                 })
+            else:
+                for version in allowed_versions:
+                    if model_name.endswith(f'-{version}'):
+                        models_data.append({
+                            "id": model_name,
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "Kiru",
+                            "type": model_info.get("type", "chat")
+                        })
+                        break
       
     return {
         "object": "list",
@@ -1201,20 +1256,24 @@ async def get_models(api_key: str = Depends(verify_api_key)):
 
 @app.get("/api/models")
 async def get_models_for_landing(authorization: str = Header(None, alias="Authorization")):
-    """Get models grouped by version for landing page, optionally filtered by API key version"""
+    """Get models grouped by version for landing page, optionally filtered by API key version(s)"""
     
     # Check if authorization header is provided
-    allowed_version = 'all'
+    allowed_versions = ['all']
     if authorization and authorization.startswith("Bearer "):
         api_key = authorization.replace("Bearer ", "", 1)
         if api_key_manager.is_valid(api_key):
-            allowed_version = api_key_manager.get_key_version(api_key)
+            allowed_versions = api_key_manager.get_key_versions_list(api_key)
     
-    return await get_models_grouped(allowed_version)
+    return await get_models_grouped(allowed_versions)
 
 @app.get("/api/models/grouped")
-async def get_models_grouped(version_filter: str = 'all'):
+async def get_models_grouped(version_filters: list = ['all']):
     """Get models grouped by version for landing page"""
+    # Handle both list and string input for backward compatibility
+    if isinstance(version_filters, str):
+        version_filters = [version_filters]
+    
     models_by_version = {}
     
     try:
@@ -1227,8 +1286,8 @@ async def get_models_grouped(version_filter: str = 'all'):
                         version = model_name.split('-v')[-1]
                         version_key = f"v{version}"
                         
-                        # Filter by version if not 'all'
-                        if version_filter == 'all' or version == version_filter:
+                        # Filter by version(s) if not 'all'
+                        if 'all' in version_filters or version in version_filters:
                             if version_key not in models_by_version:
                                 models_by_version[version_key] = []
                             
