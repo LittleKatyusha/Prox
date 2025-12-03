@@ -1,0 +1,22 @@
+# Cloudflare Tunnel Configuration
+# Single Port Setup - Everything runs on port 8741 (Python server with integrated Next.js)
+
+tunnel: YOUR_TUNNEL_ID_HERE
+credentials-file: /path/to/YOUR_TUNNEL_CREDENTIALS.json
+
+ingress:
+  # All traffic goes to Python server (which serves Next.js landing page at root)
+  - hostname: cloud.kiru.fun
+    service: http://localhost:8741
+  
+  # Catch-all rule (required)
+  - service: http_status:404
+
+# Routes served by Python server (port 8741):
+# / → Next.js landing page
+# /api/models/grouped → API endpoint for models
+# /v1/chat/completions → AI API endpoint
+# /admin/usage → Admin dashboard
+# /admin/manager → API key manager
+# /admin/login → Admin login
+# All other /admin/* endpoints → Admin APIs

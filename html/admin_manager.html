@@ -282,7 +282,7 @@
         /* Add Key Form */
         .add-key-form {
             display: grid;
-            grid-template-columns: 1fr 1fr auto auto;
+            grid-template-columns: 1fr 1fr 1fr auto auto;
             gap: 16px;
             align-items: end;
         }
@@ -411,8 +411,9 @@
         }
 
         th:nth-of-type(1) { min-width: 20%; }
-        th:nth-of-type(2) { min-width: 60%; }
-        th:nth-of-type(3) { min-width: 20%; }
+        th:nth-of-type(2) { min-width: 45%; }
+        th:nth-of-type(3) { min-width: 15%; }
+        th:nth-of-type(4) { min-width: 20%; }
 
 
         .keys-table td {
@@ -769,6 +770,22 @@
                         <label for="newApiKey">API Key</label>
                         <input type="text" id="newApiKey" placeholder="Leave empty to generate">
                     </div>
+                    <div class="form-group">
+                        <label for="newKeyVersion">Version Access</label>
+                        <select id="newKeyVersion" style="padding: 12px 16px; border: 2px solid var(--gray-200); border-radius: 10px; font-size: 14px; font-family: inherit; background: var(--gray-50); cursor: pointer;">
+                            <option value="all">All Versions</option>
+                            <option value="v1">V1 Only</option>
+                            <option value="v2">V2 Only</option>
+                            <option value="v3">V3 Only</option>
+                            <option value="v4">V4 Only</option>
+                            <option value="v5">V5 Only</option>
+                            <option value="v6">V6 Only</option>
+                            <option value="v7">V7 Only</option>
+                            <option value="v8">V8 Only</option>
+                            <option value="v9">V9 Only</option>
+                            <option value="v10">V10 Only</option>
+                        </select>
+                    </div>
                     <button class="btn btn-success" onclick="generateKey()">
                         <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
                         Generate
@@ -813,7 +830,7 @@
         // Logout
         function logout() {
             sessionStorage.removeItem('adminMasterKey');
-            window.location.href = '/admin/login/manager';
+            window.location.href = '/admin/login';
         }
 
         // Generate random API key
@@ -830,7 +847,7 @@
         async function loadKeys() {
             const MASTER_KEY = sessionStorage.getItem('adminMasterKey');
             if (!MASTER_KEY) {
-                window.location.href = '/admin/login/manager';
+                window.location.href = '/admin/login';
                 return;
             }
 
@@ -867,6 +884,7 @@
                         <tr>
                             <th>Name</th>
                             <th>API Key</th>
+                            <th>Version</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -874,7 +892,8 @@
             `;
 
             keys.forEach(key => {
-                const maskedKey = key.api_key.substring(0, 10) + '...' + key.api_key.substring(key.api_key.length - 4);
+                const version = key.version || 'all';
+                const versionBadge = version === 'all' ? 'All Versions' : version.toUpperCase();
                 html += `
                     <tr id="key-row-${key.api_key}">
                         <td>
@@ -883,6 +902,22 @@
                         </td>
                         <td>
                             <span class="key-display">${escapeHtml(key.api_key)}</span>
+                        </td>
+                        <td>
+                            <span class="version-display badge">${versionBadge}</span>
+                            <select class="edit-version" style="display: none; padding: 8px 12px; border: 2px solid var(--primary); border-radius: 8px; font-size: 14px;">
+                                <option value="all" ${version === 'all' ? 'selected' : ''}>All Versions</option>
+                                <option value="v1" ${version === 'v1' ? 'selected' : ''}>V1 Only</option>
+                                <option value="v2" ${version === 'v2' ? 'selected' : ''}>V2 Only</option>
+                                <option value="v3" ${version === 'v3' ? 'selected' : ''}>V3 Only</option>
+                                <option value="v4" ${version === 'v4' ? 'selected' : ''}>V4 Only</option>
+                                <option value="v5" ${version === 'v5' ? 'selected' : ''}>V5 Only</option>
+                                <option value="v6" ${version === 'v6' ? 'selected' : ''}>V6 Only</option>
+                                <option value="v7" ${version === 'v7' ? 'selected' : ''}>V7 Only</option>
+                                <option value="v8" ${version === 'v8' ? 'selected' : ''}>V8 Only</option>
+                                <option value="v9" ${version === 'v9' ? 'selected' : ''}>V9 Only</option>
+                                <option value="v10" ${version === 'v10' ? 'selected' : ''}>V10 Only</option>
+                            </select>
                         </td>
                         <td>
                             <div class="actions" style="">
@@ -920,6 +955,7 @@
 
             const name = document.getElementById('newKeyName').value.trim();
             const apiKey = document.getElementById('newApiKey').value.trim();
+            const version = document.getElementById('newKeyVersion').value;
 
             if (!name) {
                 showMessage('Please enter a key name', 'error');
@@ -938,7 +974,7 @@
                         'Content-Type': 'application/json',
                         'Authorization': MASTER_KEY
                     },
-                    body: JSON.stringify({ api_key: apiKey, name: name })
+                    body: JSON.stringify({ api_key: apiKey, name: name, version: version })
                 });
 
                 if (response.status === 401) {
@@ -954,6 +990,7 @@
                 showMessage('API key added successfully!', 'success');
                 document.getElementById('newKeyName').value = '';
                 document.getElementById('newApiKey').value = '';
+                document.getElementById('newKeyVersion').value = 'all';
                 loadKeys();
             } catch (error) {
                 showMessage('Error adding key: ' + error.message, 'error');
@@ -977,11 +1014,15 @@
             const row = document.getElementById(`key-row-${apiKey}`);
             const nameDisplay = row.querySelector('.key-name-display');
             const nameInput = row.querySelector('.edit-input');
+            const versionDisplay = row.querySelector('.version-display');
+            const versionSelect = row.querySelector('.edit-version');
             const editBtn = row.querySelector('.btn-primary');
             const saveBtn = row.querySelector('.btn-success');
 
             nameDisplay.style.display = 'none';
             nameInput.style.display = 'block';
+            versionDisplay.style.display = 'none';
+            versionSelect.style.display = 'block';
             editBtn.style.display = 'none';
             saveBtn.style.display = 'inline-block';
             nameInput.focus();
@@ -991,13 +1032,15 @@
         async function saveKey(apiKey) {
             const MASTER_KEY = sessionStorage.getItem('adminMasterKey');
             if (!MASTER_KEY) {
-                window.location.href = '/admin/login/manager';
+                window.location.href = '/admin/login';
                 return;
             }
 
             const row = document.getElementById(`key-row-${apiKey}`);
             const nameInput = row.querySelector('.edit-input');
+            const versionSelect = row.querySelector('.edit-version');
             const newName = nameInput.value.trim();
+            const newVersion = versionSelect.value;
 
             if (!newName) {
                 showMessage('Name cannot be empty', 'error');
@@ -1011,7 +1054,7 @@
                         'Content-Type': 'application/json',
                         'Authorization': MASTER_KEY
                     },
-                    body: JSON.stringify({ name: newName, api_key: apiKey })
+                    body: JSON.stringify({ name: newName, version: newVersion, api_key: apiKey })
                 });
 
                 if (response.status === 401) {
