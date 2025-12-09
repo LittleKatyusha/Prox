@@ -18,9 +18,12 @@ claude-sonnet-4-5-20250929-v3
 gemini-3-pro-preview-v4
 
 #v5
-claude-4.1-opus-v5
-claude-sonnet-4-5-20250929-v5
-claude-4.5-sonnet-v5
+claude-opus-4-5-thinking-v5
+claude-sonnet-4-5-thinking-v5
+claude-sonnet-4-5-v5
+gemini-3-pro-high-v5
+gemini-3-pro-low-v5
+gemini-2.5-pro-v5
 
 #v6
 ANT/gemini-3-pro-high-v6
